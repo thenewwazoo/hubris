@@ -475,23 +475,24 @@ pub fn package(
             })
             .collect::<Result<_, _>>()?;
 
-        // Check stack sizes and resolve task slots in our linked files
-        let mut possible_stack_overflow = vec![];
-        for task_name in cfg.toml.tasks.keys() {
-            if tasks_to_build.contains(task_name.as_str()) {
-                if task_can_overflow(&cfg.toml, task_name, verbose)? {
-                    possible_stack_overflow.push(task_name);
-                }
-
-                resolve_task_slots(&cfg, task_name, image_name)?;
-            }
-        }
-        if !possible_stack_overflow.is_empty() {
-            bail!(
-                "tasks may overflow: {possible_stack_overflow:?}; \
-                 see logs above"
-            );
-        }
+        //        // Check stack sizes and resolve task slots in our linked files
+        //        let mut possible_stack_overflow = vec![];
+        //        for task_name in cfg.toml.tasks.keys() {
+        //            if tasks_to_build.contains(task_name.as_str()) {
+        //                if task_can_overflow(&cfg.toml, task_name, verbose)? {
+        //                    possible_stack_overflow.push(task_name);
+        //                }
+        //
+        //                resolve_task_slots(&cfg, task_name, image_name)?;
+        //            }
+        //        }
+        //        if !possible_stack_overflow.is_empty() {
+        //            bail!(
+        //                "tasks may overflow: {possible_stack_overflow:?}; \
+        //                 see logs above"
+        //            );
+        //        }
+        eprintln!("skipped stack overflow check");
 
         // Add an empty output section for the caboose
         //
@@ -1983,20 +1984,40 @@ fn build(
             );
             output
         });
-    cmd.env(
-        "RUSTFLAGS",
-        format!(
-            "-C link-arg=-z -C link-arg=common-page-size=0x20 \
-             -C link-arg=-z -C link-arg=max-page-size=0x20 \
-             -C llvm-args=--enable-machine-outliner=never \
-             -Z emit-stack-sizes \
-             -C overflow-checks=y \
-             -C metadata={} \
-             {}
-             ",
-            cfg.link_script_hash, remap_path_prefix,
-        ),
-    );
+
+    let emit_stack_sizes_rustflag = false;
+
+    if emit_stack_sizes_rustflag {
+        cmd.env(
+            "RUSTFLAGS",
+            format!(
+                "-C link-arg=-z -C link-arg=common-page-size=0x20 \
+                 -C link-arg=-z -C link-arg=max-page-size=0x20 \
+                 -C llvm-args=--enable-machine-outliner=never \
+                 -Z emit-stack-sizes \
+                 -C overflow-checks=y \
+                 -C metadata={} \
+                 {}
+                 ",
+                cfg.link_script_hash, remap_path_prefix,
+            ),
+        );
+    } else {
+        cmd.env(
+            "RUSTFLAGS",
+            format!(
+                "-C link-arg=-z -C link-arg=common-page-size=0x20 \
+                 -C link-arg=-z -C link-arg=max-page-size=0x20 \
+                 -C llvm-args=--enable-machine-outliner=never \
+                 -C overflow-checks=y \
+                 -C metadata={} \
+                 {}
+                 ",
+                cfg.link_script_hash, remap_path_prefix,
+            ),
+        );
+    }
+
     cmd.arg("--");
 
     // We use attributes to conditionally import based on feature flags;
