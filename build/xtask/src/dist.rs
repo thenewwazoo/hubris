@@ -14,6 +14,8 @@ use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
 use atty::Stream;
+use cargo_metadata::diagnostic::DiagnosticLevel;
+use cargo_metadata::Message;
 use indexmap::IndexMap;
 use lpc55_rom_data::FLASH_PAGE_SIZE as LPC55_FLASH_PAGE_SIZE;
 use multimap::MultiMap;
@@ -367,6 +369,13 @@ pub fn package(
     // return value, because we're going to link them regardless of whether the
     // build changed.
     for name in cfg.toml.tasks.keys() {
+        // Magic for lpc55-swd to be able to include endoscope, until artifact
+        // dependencies are available on stable. See build_endoscope's commend for
+        // more.
+        if cfg.toml.tasks[name.as_str()].name == "drv-lpc55-swd" {
+            build_endoscope()?;
+        }
+
         if tasks_to_build.contains(name.as_str()) {
             build_task(&cfg, name)?;
         }
@@ -1072,6 +1081,95 @@ fn check_rebuild(toml: &Config) -> Result<()> {
 struct LoadSegment {
     source_file: PathBuf,
     data: Vec<u8>,
+}
+
+/// Build the endoscope binary here because it can't be built by stable cargo yet
+///
+/// This function invokes cargo directly in order to build the endoscope crate's binary target.
+/// Endoscope is a dependency of the lpc55-swd driver, but until artifact dependencies are
+/// stabilized, cargo cannot be used to build it.
+///
+/// For more see https://github.com/rust-lang/cargo/issues/9096
+///
+/// Once it's built and the environment variable is set, lpc55-swd's `build.rs` file is able to
+/// find, and include, the binary's bytes in its output.
+fn build_endoscope() -> Result<()> {
+    let mut cmd = Command::new(std::env::var("CARGO")?);
+    cmd.args([
+        "build",
+        "--release",
+        "-p",
+        "endoscope",
+        "--target",
+        "thumbv7em-none-eabihf",
+        "--features",
+        "soc_stm32h753",
+        "--message-format",
+        "json",
+    ]);
+    cmd.env("CARGO_TARGET_DIR", "target"); // share target dir (optional)
+    let output = cmd.stdout(Stdio::piped()).spawn()?.wait_with_output()?;
+
+    // inspect cargo output to determine whether the build failed
+    let did_cargo_succeed = Message::parse_stream(output.stdout.as_slice())
+        .filter_map(|msg| {
+            if let Ok(Message::BuildFinished(bf)) = msg {
+                Some(bf.success)
+            } else {
+                None
+            }
+        })
+        .all(|s| s);
+
+    // if cargo did not succeed or exited with a non-success exit code, grab the rendered output
+    // from each compiler message and try to build something approximating normal compiler output.
+    if !did_cargo_succeed || !output.status.success() {
+        return Err(anyhow!(
+            "building endoscope did not succeed: \n{}",
+            Message::parse_stream(output.stdout.as_slice())
+                .filter_map(|msg| {
+                    if let Ok(Message::CompilerMessage(msg)) = msg {
+                        Some(
+                            String::from_utf8(
+                                msg.message
+                                    .rendered
+                                    .unwrap_or("no output rendered".to_string())
+                                    .into(),
+                            )
+                            .unwrap_or("output is not valid utf-8".to_string()),
+                        )
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<String>>()
+                .join("\n")
+        ));
+    }
+
+    // Parse path to the produced ELF
+    let mut path = None;
+    for msg in Message::parse_stream(output.stdout.as_slice()).flatten() {
+        if let Message::CompilerArtifact(art) = msg {
+            if art.target.kind.iter().any(|k| k == "bin")
+                && art.target.name == "endoscope"
+            {
+                path = art.executable.clone(); // Some(PathBuf)
+            }
+        }
+    }
+    match path {
+        Some(path) => {
+            // setting this env var lets the lpc55-swd `build.rs` file know where to find the built
+            // binary. this would otherwise be done by cargo as part of artifact dependency
+            // support.
+            std::env::set_var("CARGO_BIN_FILE_ENDOSCOPE", &path);
+            Ok(())
+        }
+        None => Err(anyhow!(
+            "endoscope was built but the binary could not be located"
+        )),
+    }
 }
 
 /// Builds a specific task
